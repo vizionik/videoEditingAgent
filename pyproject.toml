@@ -1,0 +1,11 @@
+[project]
+name = "videoeditingagent"
+version = "0.1.0"
+description = "An AI powered video editing agent using the pydantic-ai agentic framework for the AI parts and MoviePy v.2.xfor the video editing tooling. Combined theese two frameworks are a Powerhouse combination for video editors of all levels. No matter if you are creating content for a youtube, tiktok channel or are an Indie Film Maker, or are just creating content for fun videoEditingAgent has you covered."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "moviepy==2.1.2",
+    "pydantic-ai-slim[mcp]>=0.0.43",
+    "pydantic-ai>=0.0.43",
+]
