@@ -2,10 +2,17 @@ from enum import Enum
 from typing import List, Optional, Tuple, Union, Dict, Any, Literal
 from pathlib import Path
 
-from moviepy import *
+import numpy as np
+from moviepy import (
+    VideoFileClip, 
+    CompositeVideoClip, 
+    TextClip, 
+    concatenate_videoclips, 
+    vfx
+)
+from scipy.ndimage import gaussian_filter
 from pydantic import Field, BaseModel
 from pydantic_ai import Tool
-
 
 class EffectParams(BaseModel):
     duration: Optional[float] = Field(None, description="Duration for fade effects")
@@ -13,12 +20,15 @@ class EffectParams(BaseModel):
     width: Optional[int] = Field(None, description="Width for resize effect")
     height: Optional[int] = Field(None, description="Height for resize effect")
     angle: Optional[float] = Field(None, description="Angle for rotate effect")
-
+    # Chromakey parameters
+    key_color: Optional[str] = Field("green", description="Color to key out (e.g., 'green', 'blue')")
+    color_tolerance: Optional[float] = Field(40.0, description="Color tolerance (0-100)")
+    blur: Optional[float] = Field(1.0, description="Blur amount for edge softening")
+    background_path: Optional[str] = Field(None, description="Path to background video/image")
 
 class TextPosition(BaseModel):
     x: Literal['left', 'center', 'right'] = Field('center')
     y: Literal['top', 'center', 'bottom'] = Field('center')
-
 
 class VideoEffect(str, Enum):
     FADEOUT = "fadeout"
@@ -29,7 +39,7 @@ class VideoEffect(str, Enum):
     ROTATE = "rotate"
     MIRROR_X = "mirror_x"
     MIRROR_Y = "mirror_y"
-
+    CHROMAKEY = "chromakey"
 
 class VideoFormat(str, Enum):
     MP4 = "mp4"
@@ -38,6 +48,84 @@ class VideoFormat(str, Enum):
     MOV = "mov"
     WEBM = "webm"
 
+def rgb_to_hsv(rgb):
+    """Convert RGB color space to HSV."""
+    rgb_normalized = rgb.astype('float32') / 255.0
+    maxc = np.maximum(np.maximum(rgb_normalized[..., 0], rgb_normalized[..., 1]), rgb_normalized[..., 2])
+    minc = np.minimum(np.minimum(rgb_normalized[..., 0], rgb_normalized[..., 1]), rgb_normalized[..., 2])
+    v = maxc
+    
+    zeros = np.zeros_like(maxc)
+    ones = np.ones_like(maxc)
+    
+    s = np.where(maxc != 0, (maxc - minc) / maxc, zeros)
+    rc = np.where(maxc != minc, (rgb_normalized[..., 1] - rgb_normalized[..., 2]) / (maxc - minc), zeros)
+    gc = np.where(maxc != minc, 2.0 + (rgb_normalized[..., 2] - rgb_normalized[..., 0]) / (maxc - minc), zeros)
+    bc = np.where(maxc != minc, 4.0 + (rgb_normalized[..., 0] - rgb_normalized[..., 1]) / (maxc - minc), zeros)
+    
+    h = np.where(rgb_normalized[..., 0] == maxc, bc,
+                 np.where(rgb_normalized[..., 1] == maxc, rc, gc))
+    h = np.where(maxc != minc, (h / 6.0) % 1.0, zeros)
+    
+    return np.dstack((h, s, v))
+
+def create_chromakey_mask(frame, key_color: str, tolerance: float = 40.0, blur: float = 1.0) -> np.ndarray:
+    """
+    Create a mask for chromakey effect using both RGB and HSV color spaces.
+    
+    Args:
+        frame: Input frame
+        key_color: Color to key out ('green' or 'blue')
+        tolerance: Color tolerance (0-100)
+        blur: Blur amount for edge softening
+    
+    Returns:
+        numpy.ndarray: Alpha mask
+    """
+    # Convert tolerance to 0-1 range
+    tolerance = tolerance / 100.0
+    
+    # Define color ranges based on key_color
+    if key_color.lower() == 'green':
+        # HSV ranges for green
+        hue_target = 0.33  # Green in HSV
+        rgb_target = np.array([0, 255, 0])
+    else:  # blue
+        # HSV ranges for blue
+        hue_target = 0.66  # Blue in HSV
+        rgb_target = np.array([0, 0, 255])
+
+    # Convert frame to HSV
+    hsv = rgb_to_hsv(frame)
+    
+    # Create masks using both HSV and RGB
+    hsv_mask = np.abs(hsv[..., 0] - hue_target) < tolerance
+    
+    # Normalize RGB values
+    frame_normalized = frame.astype('float32') / 255.0
+    rgb_target_normalized = rgb_target.astype('float32') / 255.0
+    
+    # Calculate RGB color difference
+    rgb_diff = np.sqrt(np.sum((frame_normalized - rgb_target_normalized) ** 2, axis=-1))
+    rgb_mask = rgb_diff < tolerance
+    
+    # Combine masks
+    combined_mask = hsv_mask & rgb_mask
+    
+    # Apply saturation and value thresholds to reduce noise
+    combined_mask = combined_mask & (hsv[..., 1] > 0.2) & (hsv[..., 2] > 0.2)
+    
+    # Convert to float
+    mask = combined_mask.astype('float32')
+    
+    # Apply gaussian blur for smoother edges
+    if blur > 0:
+        mask = gaussian_filter(mask, sigma=blur)
+    
+    # Ensure mask is in correct range
+    mask = np.clip(mask, 0, 1)
+    
+    return mask
 
 def load_video(filepath: str) -> str:
     """
@@ -52,7 +140,6 @@ def load_video(filepath: str) -> str:
     }
     video.close()
     return f"Video loaded successfully: {info}"
-
 
 def trim_video(
     input_path: str, 
@@ -69,7 +156,6 @@ def trim_video(
     video.close()
     trimmed.close()
     return f"Video trimmed and saved to {output_path}"
-
 
 def apply_effect(
     input_path: str,
@@ -100,6 +186,35 @@ def apply_effect(
         processed = video.fx(vfx.mirror_x)
     elif effect == VideoEffect.MIRROR_Y:
         processed = video.fx(vfx.mirror_y)
+    elif effect == VideoEffect.CHROMAKEY:
+        if not params.background_path:
+            video.close()
+            return "Background path is required for chromakey effect"
+        
+        # Load background video/image
+        background = VideoFileClip(params.background_path)
+        
+        # Resize background to match foreground if needed
+        if background.size != video.size:
+            background = background.resize(video.size)
+        
+        # Create chromakey effect
+        def chromakey_frame(get_frame, t):
+            frame = get_frame(t)
+            mask = create_chromakey_mask(
+                frame,
+                params.key_color or "green",
+                params.color_tolerance or 40.0,
+                params.blur or 1.0
+            )
+            return frame * mask[..., np.newaxis]
+        
+        # Apply the effect
+        processed = video.fl(chromakey_frame)
+        
+        # Composite with background
+        processed = CompositeVideoClip([background, processed])
+        background.close()
     else:
         video.close()
         return f"Effect {effect} not implemented."
@@ -108,7 +223,6 @@ def apply_effect(
     video.close()
     processed.close()
     return f"Effect {effect} applied and saved to {output_path}"
-
 
 def concatenate_videos(
     input_paths: List[str], 
@@ -125,7 +239,6 @@ def concatenate_videos(
     final_clip.close()
     return f"Videos concatenated and saved to {output_path}"
 
-
 def extract_audio(
     input_path: str, 
     output_path: str
@@ -139,7 +252,6 @@ def extract_audio(
     video.close()
     audio.close()
     return f"Audio extracted and saved to {output_path}"
-
 
 def add_text(
     input_path: str,
@@ -166,7 +278,6 @@ def add_text(
     final.close()
     return f"Text added to video and saved to {output_path}"
 
-
 def convert_format(
     input_path: str,
     output_path: str,
@@ -184,7 +295,6 @@ def convert_format(
         
     video.close()
     return f"Video converted to {format} and saved to {output_path}"
-
 
 # Define the list of tools to be used by the agent
 moviepy_tools = [
