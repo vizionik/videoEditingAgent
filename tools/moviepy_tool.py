@@ -25,6 +25,11 @@ class EffectParams(BaseModel):
     color_tolerance: Optional[float] = Field(40.0, description="Color tolerance (0-100)")
     blur: Optional[float] = Field(1.0, description="Blur amount for edge softening")
     background_path: Optional[str] = Field(None, description="Path to background video/image")
+    
+    # Luminance key parameters
+    luminance_min: Optional[float] = Field(0.0, description="Minimum brightness threshold (0-1)")
+    luminance_max: Optional[float] = Field(1.0, description="Maximum brightness threshold (0-1)")
+    softness: Optional[float] = Field(0.1, description="Softness of the luminance key transition (0-1)")
 
 class TextPosition(BaseModel):
     x: Literal['left', 'center', 'right'] = Field('center')
@@ -40,6 +45,7 @@ class VideoEffect(str, Enum):
     MIRROR_X = "mirror_x"
     MIRROR_Y = "mirror_y"
     CHROMAKEY = "chromakey"
+    LUMINANCE_KEY = "luminance_key"
 
 class VideoFormat(str, Enum):
     MP4 = "mp4"
@@ -121,6 +127,42 @@ def create_chromakey_mask(frame, key_color: str, tolerance: float = 40.0, blur: 
     # Apply gaussian blur for smoother edges
     if blur > 0:
         mask = gaussian_filter(mask, sigma=blur)
+    
+    # Ensure mask is in correct range
+    mask = np.clip(mask, 0, 1)
+    
+    return mask
+
+def create_luminance_mask(frame, min_thresh: float = 0.0, max_thresh: float = 1.0, softness: float = 0.1) -> np.ndarray:
+    """
+    Create a mask for luminance key effect based on pixel brightness.
+    
+    Args:
+        frame: Input frame
+        min_thresh: Minimum brightness threshold (0-1)
+        max_thresh: Maximum brightness threshold (0-1)
+        softness: Softness of the transition (0-1)
+    
+    Returns:
+        numpy.ndarray: Alpha mask
+    """
+    # Convert frame to grayscale using perceived luminance weights
+    luminance = np.dot(frame[..., :3], [0.2989, 0.5870, 0.1140])
+    
+    # Normalize to 0-1 range
+    luminance = luminance / 255.0
+    
+    # Create soft transition ranges
+    soft_min = min_thresh - softness
+    soft_max = max_thresh + softness
+    
+    # Create mask with soft transitions
+    mask = np.clip((luminance - soft_min) / softness, 0, 1) * \
+           np.clip((soft_max - luminance) / softness, 0, 1)
+    
+    # Apply gaussian blur for smoother edges
+    if softness > 0:
+        mask = gaussian_filter(mask, sigma=softness * 2)
     
     # Ensure mask is in correct range
     mask = np.clip(mask, 0, 1)
@@ -211,6 +253,35 @@ def apply_effect(
         
         # Apply the effect
         processed = video.fl(chromakey_frame)
+        
+        # Composite with background
+        processed = CompositeVideoClip([background, processed])
+        background.close()
+    elif effect == VideoEffect.LUMINANCE_KEY:
+        if not params.background_path:
+            video.close()
+            return "Background path is required for luminance key effect"
+        
+        # Load background video/image
+        background = VideoFileClip(params.background_path)
+        
+        # Resize background to match foreground if needed
+        if background.size != video.size:
+            background = background.resize(video.size)
+        
+        # Create luminance key effect
+        def luminance_key_frame(get_frame, t):
+            frame = get_frame(t)
+            mask = create_luminance_mask(
+                frame,
+                params.luminance_min or 0.0,
+                params.luminance_max or 1.0,
+                params.softness or 0.1
+            )
+            return frame * mask[..., np.newaxis]
+        
+        # Apply the effect
+        processed = video.fl(luminance_key_frame)
         
         # Composite with background
         processed = CompositeVideoClip([background, processed])
