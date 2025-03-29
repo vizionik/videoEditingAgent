@@ -80,11 +80,13 @@ class ChatSession:
         """List all available video editing tools and effects."""
         output = ["Available Video Editing Tools:"]
         
-        # List main tools
+        # List main tools with cleaner formatting
         for tool in moviepy_tools:
-            doc = tool.__doc__ or "No description available"
-            doc = doc.strip().split('\n')[0]  # Get first line of docstring
-            output.append(f"- {tool.__name__}: {doc}")
+            # Each tool has name and description attributes
+            name = tool.name.replace('_', ' ').title()
+            desc = tool.description or "No description available"
+            desc = desc.split('\n')[0]  # Get first line of description
+            output.append(f"- {name}: {desc}")
         
         # Add a blank line for readability
         output.append("")
@@ -109,16 +111,24 @@ class ChatSession:
         if not tool_name:
             return "Usage: tool <tool_name> (e.g., 'tool trim_video')"
 
+        # Convert tool name to match the stored format
+        tool_name = tool_name.lower().replace(' ', '_')
+
         for tool in moviepy_tools:
-            if tool.__name__ == tool_name:
-                doc = tool.__doc__ or "No documentation available"
-                params = inspect.signature(tool).parameters
+            if tool.name == tool_name:
+                # Get full description and parameters from the tool's schema
+                desc = tool.description or "No documentation available"
+                schema = tool._parameters_json_schema
+                
+                # Format parameter documentation
                 param_docs = ["Parameters:"]
-                for name, param in params.items():
-                    annotation = param.annotation.__name__ if hasattr(param.annotation, '__name__') else str(param.annotation)
-                    default = "" if param.default == inspect.Parameter.empty else f" (default: {param.default})"
-                    param_docs.append(f"- {name}: {annotation}{default}")
-                return f"{doc}\n\n" + '\n'.join(param_docs)
+                if 'properties' in schema:
+                    for param_name, param_info in schema['properties'].items():
+                        description = param_info.get('description', 'No description')
+                        param_docs.append(f"- {param_name}: {description}")
+                
+                return f"{desc}\n\n" + '\n'.join(param_docs)
+        
         return f"Tool '{tool_name}' not found"
 
     def list_effects(self) -> str:

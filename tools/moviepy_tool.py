@@ -1,39 +1,25 @@
+import os
 from enum import Enum
 from typing import List, Optional, Tuple, Union, Dict, Any, Literal
 from pathlib import Path
 
 import numpy as np
-from moviepy import (
-    VideoFileClip, 
-    CompositeVideoClip, 
-    TextClip, 
-    concatenate_videoclips, 
-    vfx
-)
+from moviepy import VideoFileClip
+from moviepy import TextClip
+from moviepy import CompositeVideoClip
+from moviepy import concatenate_videoclips
+from moviepy import vfx
 from scipy.ndimage import gaussian_filter
 from pydantic import Field, BaseModel
-from pydantic_ai import Tool
+from pydantic_ai import Agent, Tool, tools
 
-class EffectParams(BaseModel):
-    duration: Optional[float] = Field(None, description="Duration for fade effects")
-    factor: Optional[float] = Field(None, description="Speed factor for speedx effect")
-    width: Optional[int] = Field(None, description="Width for resize effect")
-    height: Optional[int] = Field(None, description="Height for resize effect")
-    angle: Optional[float] = Field(None, description="Angle for rotate effect")
-    # Chromakey parameters
-    key_color: Optional[str] = Field("green", description="Color to key out (e.g., 'green', 'blue')")
-    color_tolerance: Optional[float] = Field(40.0, description="Color tolerance (0-100)")
-    blur: Optional[float] = Field(1.0, description="Blur amount for edge softening")
-    background_path: Optional[str] = Field(None, description="Path to background video/image")
-    
-    # Luminance key parameters
-    luminance_min: Optional[float] = Field(0.0, description="Minimum brightness threshold (0-1)")
-    luminance_max: Optional[float] = Field(1.0, description="Maximum brightness threshold (0-1)")
-    softness: Optional[float] = Field(0.1, description="Softness of the luminance key transition (0-1)")
-
-class TextPosition(BaseModel):
-    x: Literal['left', 'center', 'right'] = Field('center')
-    y: Literal['top', 'center', 'bottom'] = Field('center')
+# Video format and effect enums
+class VideoFormat(str, Enum):
+    MP4 = "mp4"
+    GIF = "gif"
+    AVI = "avi"
+    MOV = "mov"
+    WEBM = "webm"
 
 class VideoEffect(str, Enum):
     FADEOUT = "fadeout"
@@ -47,12 +33,72 @@ class VideoEffect(str, Enum):
     CHROMAKEY = "chromakey"
     LUMINANCE_KEY = "luminance_key"
 
-class VideoFormat(str, Enum):
-    MP4 = "mp4"
-    GIF = "gif"
-    AVI = "avi"
-    MOV = "mov"
-    WEBM = "webm"
+# Position and parameter models
+class TextPosition(BaseModel):
+    x: Literal['left', 'center', 'right'] = Field('center')
+    y: Literal['top', 'center', 'bottom'] = Field('center')
+
+class EffectParams(BaseModel):
+    duration: Optional[float] = Field(None, description="Duration for fade effects")
+    factor: Optional[float] = Field(None, description="Speed factor for speedx effect")
+    width: Optional[int] = Field(None, description="Width for resize effect")
+    height: Optional[int] = Field(None, description="Height for resize effect")
+    angle: Optional[float] = Field(None, description="Angle for rotate effect")
+    key_color: Optional[str] = Field("green", description="Color to key out (e.g., 'green', 'blue')")
+    color_tolerance: Optional[float] = Field(40.0, description="Color tolerance (0-100)")
+    blur: Optional[float] = Field(1.0, description="Blur amount for edge softening")
+    background_path: Optional[str] = Field(None, description="Path to background video/image")
+    luminance_min: Optional[float] = Field(0.0, description="Minimum brightness threshold (0-1)")
+    luminance_max: Optional[float] = Field(1.0, description="Maximum brightness threshold (0-1)")
+    softness: Optional[float] = Field(0.1, description="Softness of the luminance key transition (0-1)")
+
+# Result models for tool operations
+class VideoInfo(BaseModel):
+    """Video information returned by load_video tool"""
+    duration: float = Field(description="Duration of video in seconds")
+    fps: float = Field(description="Frames per second")
+    width: int = Field(description="Video width in pixels")
+    height: int = Field(description="Video height in pixels")
+    filepath: str = Field(description="Path to the video file")
+
+class TrimResult(BaseModel):
+    """Result of trimming a video"""
+    output_path: str = Field(description="Path where the trimmed video was saved")
+    start_time: float = Field(description="Start time of the trim in seconds")
+    end_time: Optional[float] = Field(None, description="End time of the trim in seconds (None means end of video)")
+
+class EffectResult(BaseModel):
+    """Result of applying an effect to a video"""
+    output_path: str = Field(description="Path where the processed video was saved")
+    effect: VideoEffect = Field(description="The effect that was applied")
+    params: Dict[str, Any] = Field(description="Parameters used for the effect")
+
+class ConcatResult(BaseModel):
+    """Result of concatenating videos"""
+    output_path: str = Field(description="Path where the concatenated video was saved")
+    input_count: int = Field(description="Number of input videos concatenated")
+
+class AudioResult(BaseModel):
+    """Result of audio extraction"""
+    output_path: str = Field(description="Path where the audio was saved")
+    duration: float = Field(description="Duration of the extracted audio in seconds")
+
+class TextResult(BaseModel):
+    """Result of adding text to a video"""
+    output_path: str = Field(description="Path where the video with text was saved")
+    text: str = Field(description="Text that was added")
+    position: TextPosition = Field(description="Position where text was placed")
+
+class FormatResult(BaseModel):
+    """Result of converting video format"""
+    output_path: str = Field(description="Path where the converted video was saved")
+    format: VideoFormat = Field(description="Format the video was converted to")
+
+class VoiceoverResult(BaseModel):
+    """Result of adding voiceover"""
+    output_path: str = Field(description="Path where the video with voiceover was saved")
+    start_time: float = Field(description="Start time of the voiceover in seconds")
+    volume: float = Field(description="Volume multiplier applied to voiceover")
 
 def rgb_to_hsv(rgb):
     """Convert RGB color space to HSV."""
@@ -169,162 +215,263 @@ def create_luminance_mask(frame, min_thresh: float = 0.0, max_thresh: float = 1.
     
     return mask
 
-def load_video(filepath: str) -> str:
-    """
-    Load a video file and return its information.
-    """
-    video = VideoFileClip(filepath)
-    info = {
-        "duration": video.duration,
-        "fps": video.fps,
-        "size": video.size,
-        "filepath": filepath
-    }
-    video.close()
-    return f"Video loaded successfully: {info}"
+async def load_video(ctx: tools.RunContext[None], filepath: str) -> VideoInfo:
+    """Load a video file and return its metadata information."""
+    if not filepath:
+        raise ValueError("filepath is required")
+    
+    if not os.path.exists(filepath):
+        raise ValueError(f"File not found: {filepath}")
 
-def trim_video(
-    input_path: str, 
-    output_path: str, 
-    start_time: float = 0, 
+    video = None
+    try:
+        video = VideoFileClip(filepath)
+        return VideoInfo(
+            duration=round(float(video.duration), 3),
+            fps=round(float(video.fps), 3),
+            width=int(video.size[0]),
+            height=int(video.size[1]),
+            filepath=filepath
+        )
+    except Exception as e:
+        raise ValueError(f"Error loading video: {str(e)}")
+    finally:
+        if video is not None:
+            try:
+                video.close()
+            except:
+                pass
+
+async def trim_video(
+    ctx: tools.RunContext[None],
+    input_path: str,
+    output_path: str,
+    start_time: float = 0,
     end_time: Optional[float] = None
-) -> str:
-    """
-    Trim a video to the specified start and end times.
-    """
-    video = VideoFileClip(input_path)
-    trimmed = video.subclip(start_time, end_time)
-    trimmed.write_videofile(output_path)
-    video.close()
-    trimmed.close()
-    return f"Video trimmed and saved to {output_path}"
+) -> TrimResult:
+    """Trim a video to the specified start and end times."""
+    if not input_path or not output_path:
+        raise ValueError("Both input_path and output_path are required")
+    
+    if not os.path.exists(input_path):
+        raise ValueError(f"Input file not found: {input_path}")
+    
+    video = None
+    trimmed = None
+    try:
+        video = VideoFileClip(input_path)
+        trimmed = video.subclip(start_time, end_time)
+        trimmed.write_videofile(output_path)
+        
+        return TrimResult(
+            output_path=output_path,
+            start_time=start_time,
+            end_time=end_time
+        )
+    except Exception as e:
+        raise ValueError(f"Error trimming video: {str(e)}")
+    finally:
+        if video is not None:
+            video.close()
+        if trimmed is not None:
+            trimmed.close()
 
-def apply_effect(
+async def apply_effect(
+    ctx: tools.RunContext[None],
     input_path: str,
     output_path: str,
     effect: VideoEffect,
-    params: EffectParams = EffectParams()
-) -> str:
-    """
-    Apply an effect to a video.
-    """
-    video = VideoFileClip(input_path)
+    params: Dict[str, Any] = {}
+) -> EffectResult:
+    """Apply a video effect to the input video."""
+    video = None
+    processed = None
+    background = None
+
+    try:
+        # Convert dict params to EffectParams for internal use
+        effect_params = EffectParams(**params)
+        
+        # Ensure required parameters exist for specific effects
+        if effect == VideoEffect.RESIZE and effect_params.width is None and effect_params.height is None:
+            raise ValueError("Either width or height must be specified for resize effect")
+        
+        video = VideoFileClip(input_path)
+        
+        if effect == VideoEffect.FADEOUT:
+            duration = effect_params.duration if effect_params.duration is not None else 1.0
+            processed = video.fadeout(duration)
+            
+        elif effect == VideoEffect.FADEIN:
+            duration = effect_params.duration if effect_params.duration is not None else 1.0
+            processed = video.fadein(duration)
+            
+        elif effect == VideoEffect.SPEEDX:
+            factor = effect_params.factor if effect_params.factor is not None else 2.0
+            processed = video.speedx(factor)
+            
+        elif effect == VideoEffect.RESIZE:
+            processed = video.resize(width=effect_params.width, height=effect_params.height)
+            
+        elif effect == VideoEffect.ROTATE:
+            angle = effect_params.angle if effect_params.angle is not None else 90
+            processed = video.rotate(angle)
+            
+        elif effect == VideoEffect.MIRROR_X:
+            processed = video.fx(vfx.mirror_x)
+            
+        elif effect == VideoEffect.MIRROR_Y:
+            processed = video.fx(vfx.mirror_y)
+            
+        elif effect == VideoEffect.CHROMAKEY:
+            if not effect_params.background_path:
+                raise ValueError("Background path is required for chromakey effect")
+            
+            # Load background video/image and apply effect
+            background = VideoFileClip(effect_params.background_path)
+            
+            # Resize background to match foreground if needed
+            if background.size != video.size:
+                background = background.resize(video.size)
+            
+            # Create chromakey effect
+            def chromakey_frame(get_frame, t):
+                frame = get_frame(t)
+                mask = create_chromakey_mask(
+                    frame,
+                    effect_params.key_color or "green",
+                    effect_params.color_tolerance or 40.0,
+                    effect_params.blur or 1.0
+                )
+                return frame * mask[..., np.newaxis]
+            
+            # Apply the effect
+            processed = video.fl(chromakey_frame)
+            processed = CompositeVideoClip([background, processed])
+            
+        elif effect == VideoEffect.LUMINANCE_KEY:
+            if not effect_params.background_path:
+                raise ValueError("Background path is required for luminance key effect")
+            
+            # Load background video/image and apply effect
+            background = VideoFileClip(effect_params.background_path)
+            
+            # Resize background to match foreground if needed
+            if background.size != video.size:
+                background = background.resize(video.size)
+            
+            # Create luminance key effect
+            def luminance_key_frame(get_frame, t):
+                frame = get_frame(t)
+                mask = create_luminance_mask(
+                    frame,
+                    effect_params.luminance_min or 0.0,
+                    effect_params.luminance_max or 1.0,
+                    effect_params.softness or 0.1
+                )
+                return frame * mask[..., np.newaxis]
+            
+            # Apply the effect
+            processed = video.fl(luminance_key_frame)
+            processed = CompositeVideoClip([background, processed])
+            
+        else:
+            raise ValueError(f"Effect {effect} not implemented")
+        
+        # Write the processed video to the output file
+        if processed is not None:
+            processed.write_videofile(output_path)
+            return EffectResult(
+                output_path=output_path,
+                effect=effect,
+                params=params
+            )
+        else:
+            raise ValueError("Failed to process video")
+            
+    except Exception as e:
+        raise ValueError(f"Error applying effect: {str(e)}")
     
-    if effect == VideoEffect.FADEOUT:
-        duration = params.duration or 1.0
-        processed = video.fadeout(duration)
-    elif effect == VideoEffect.FADEIN:
-        duration = params.duration or 1.0
-        processed = video.fadein(duration)
-    elif effect == VideoEffect.SPEEDX:
-        factor = params.factor or 2.0
-        processed = video.speedx(factor)
-    elif effect == VideoEffect.RESIZE:
-        processed = video.resize(width=params.width, height=params.height)
-    elif effect == VideoEffect.ROTATE:
-        angle = params.angle or 90
-        processed = video.rotate(angle)
-    elif effect == VideoEffect.MIRROR_X:
-        processed = video.fx(vfx.mirror_x)
-    elif effect == VideoEffect.MIRROR_Y:
-        processed = video.fx(vfx.mirror_y)
-    elif effect == VideoEffect.CHROMAKEY:
-        if not params.background_path:
-            video.close()
-            return "Background path is required for chromakey effect"
-        
-        # Load background video/image
-        background = VideoFileClip(params.background_path)
-        
-        # Resize background to match foreground if needed
-        if background.size != video.size:
-            background = background.resize(video.size)
-        
-        # Create chromakey effect
-        def chromakey_frame(get_frame, t):
-            frame = get_frame(t)
-            mask = create_chromakey_mask(
-                frame,
-                params.key_color or "green",
-                params.color_tolerance or 40.0,
-                params.blur or 1.0
-            )
-            return frame * mask[..., np.newaxis]
-        
-        # Apply the effect
-        processed = video.fl(chromakey_frame)
-        
-        # Composite with background
-        processed = CompositeVideoClip([background, processed])
-        background.close()
-    elif effect == VideoEffect.LUMINANCE_KEY:
-        if not params.background_path:
-            video.close()
-            return "Background path is required for luminance key effect"
-        
-        # Load background video/image
-        background = VideoFileClip(params.background_path)
-        
-        # Resize background to match foreground if needed
-        if background.size != video.size:
-            background = background.resize(video.size)
-        
-        # Create luminance key effect
-        def luminance_key_frame(get_frame, t):
-            frame = get_frame(t)
-            mask = create_luminance_mask(
-                frame,
-                params.luminance_min or 0.0,
-                params.luminance_max or 1.0,
-                params.softness or 0.1
-            )
-            return frame * mask[..., np.newaxis]
-        
-        # Apply the effect
-        processed = video.fl(luminance_key_frame)
-        
-        # Composite with background
-        processed = CompositeVideoClip([background, processed])
-        background.close()
-    else:
-        video.close()
-        return f"Effect {effect} not implemented."
-        
-    processed.write_videofile(output_path)
-    video.close()
-    processed.close()
-    return f"Effect {effect} applied and saved to {output_path}"
+    finally:
+        # Clean up resources
+        if video is not None:
+            try:
+                video.close()
+            except:
+                pass
+                
+        if processed is not None:
+            try:
+                processed.close()
+            except:
+                pass
+                
+        if background is not None:
+            try:
+                background.close()
+            except:
+                pass
 
-def concatenate_videos(
-    input_paths: List[str], 
+async def concatenate_videos(
+    ctx: tools.RunContext[None],
+    input_paths: List[str],
     output_path: str
-) -> str:
-    """
-    Concatenate multiple videos into one.
-    """
-    clips = [VideoFileClip(path) for path in input_paths]
-    final_clip = concatenate_videoclips(clips)
-    final_clip.write_videofile(output_path)
-    for clip in clips:
-        clip.close()
-    final_clip.close()
-    return f"Videos concatenated and saved to {output_path}"
+) -> ConcatResult:
+    """Concatenate multiple videos into a single video file."""
+    if not input_paths:
+        raise ValueError("No input paths provided")
+    if not output_path:
+        raise ValueError("Output path is required")
 
-def extract_audio(
-    input_path: str, 
+    clips = []
+    final_clip = None
+    try:
+        clips = [VideoFileClip(path) for path in input_paths]
+        final_clip = concatenate_videoclips(clips)
+        final_clip.write_videofile(output_path)
+        return ConcatResult(
+            output_path=output_path,
+            input_count=len(input_paths)
+        )
+    finally:
+        for clip in clips:
+            clip.close()
+        if final_clip is not None:
+            final_clip.close()
+
+async def extract_audio(
+    ctx: tools.RunContext[None],
+    input_path: str,
     output_path: str
-) -> str:
-    """
-    Extract audio from a video.
-    """
-    video = VideoFileClip(input_path)
-    audio = video.audio
-    audio.write_audiofile(output_path)
-    video.close()
-    audio.close()
-    return f"Audio extracted and saved to {output_path}"
+) -> AudioResult:
+    """Extract the audio track from a video file and save it."""
+    if not input_path:
+        raise ValueError("Input path is required")
+    if not output_path:
+        raise ValueError("Output path is required")
 
-def add_text(
+    video = None
+    audio = None
+    try:
+        video = VideoFileClip(input_path)
+        if video.audio is None:
+            raise ValueError("Video has no audio track")
+            
+        audio = video.audio
+        audio.write_audiofile(output_path)
+        
+        return AudioResult(
+            output_path=output_path,
+            duration=float(audio.duration)
+        )
+    finally:
+        if video is not None:
+            video.close()
+        if audio is not None:
+            audio.close()
+
+async def add_text(
+    ctx: tools.RunContext[None],
     input_path: str,
     output_path: str,
     text: str,
@@ -333,47 +480,135 @@ def add_text(
     color: str = 'white',
     start_time: float = 0,
     end_time: Optional[float] = None
-) -> str:
-    """
-    Add text to a video.
-    """
-    video = VideoFileClip(input_path)
-    txt_clip = TextClip(text, fontsize=fontsize, color=color)
-    txt_clip = txt_clip.set_position((position.x, position.y)).set_start(start_time)
-    if end_time is not None:
-        txt_clip = txt_clip.set_end(end_time)
-    final = CompositeVideoClip([video, txt_clip])
-    final.write_videofile(output_path)
-    video.close()
-    txt_clip.close()
-    final.close()
-    return f"Text added to video and saved to {output_path}"
+) -> TextResult:
+    """Add text overlay to a video file."""
+    if not input_path or not output_path:
+        raise ValueError("Both input_path and output_path are required")
+    if not text:
+        raise ValueError("Text is required")
 
-def convert_format(
+    video = None
+    txt_clip = None
+    final = None
+    try:
+        video = VideoFileClip(input_path)
+        txt_clip = TextClip(text, fontsize=fontsize, color=color)
+        txt_clip = txt_clip.set_position((position.x, position.y)).set_start(start_time)
+        if end_time is not None:
+            txt_clip = txt_clip.set_end(end_time)
+        final = CompositeVideoClip([video, txt_clip])
+        final.write_videofile(output_path)
+        
+        return TextResult(
+            output_path=output_path,
+            text=text,
+            position=position
+        )
+    except Exception as e:
+        raise ValueError(f"Error adding text to video: {str(e)}")
+    finally:
+        if video is not None:
+            video.close()
+        if txt_clip is not None:
+            txt_clip.close()
+        if final is not None:
+            final.close()
+
+async def convert_format(
+    ctx: tools.RunContext[None],
     input_path: str,
     output_path: str,
     format: VideoFormat = VideoFormat.MP4
-) -> str:
-    """
-    Convert a video to a different format.
-    """
-    video = VideoFileClip(input_path)
-    
-    if format == VideoFormat.GIF:
-        video.write_gif(output_path)
-    else:
-        video.write_videofile(output_path)
-        
-    video.close()
-    return f"Video converted to {format} and saved to {output_path}"
+) -> FormatResult:
+    """Convert a video file to a different format."""
+    if not input_path or not output_path:
+        raise ValueError("Both input_path and output_path are required")
+    if not os.path.exists(input_path):
+        raise ValueError(f"Input file not found: {input_path}")
 
-# Define the list of tools to be used by the agent
+    video = None
+    try:
+        video = VideoFileClip(input_path)
+        if format == VideoFormat.GIF:
+            video.write_gif(output_path)
+        else:
+            video.write_videofile(output_path)
+        
+        return FormatResult(
+            output_path=output_path,
+            format=format
+        )
+    except Exception as e:
+        raise ValueError(f"Error converting video: {str(e)}")
+    finally:
+        if video is not None:
+            video.close()
+
+async def add_voiceover(
+    ctx: tools.RunContext[None],
+    video_path: str,
+    audio_path: str,
+    output_path: str,
+    start_time: float = 0,
+    audio_volume: float = 1.0
+) -> VoiceoverResult:
+    """Add a voiceover audio track to a video."""
+    if not video_path or not audio_path or not output_path:
+        raise ValueError("All file paths are required")
+    if not os.path.exists(video_path):
+        raise ValueError(f"Video file not found: {video_path}")
+    if not os.path.exists(audio_path):
+        raise ValueError(f"Audio file not found: {audio_path}")
+
+    video = None
+    voiceover = None
+    final_video = None
+    try:
+        # Load the video and audio
+        video = VideoFileClip(video_path)
+        voiceover = VideoFileClip(audio_path).audio
+        
+        # Set the start time and volume of the voiceover
+        voiceover = voiceover.set_start(start_time).volumex(audio_volume)
+        
+        # Combine the original video with the voiceover
+        if video.audio is not None:
+            # If video has audio, mix it with the voiceover
+            final_audio = CompositeVideoClip([
+                video.set_audio(video.audio),
+                video.set_audio(voiceover)
+            ]).audio
+        else:
+            # If video has no audio, just use the voiceover
+            final_audio = voiceover
+        
+        # Create and write final video
+        final_video = video.set_audio(final_audio)
+        final_video.write_videofile(output_path)
+        
+        return VoiceoverResult(
+            output_path=output_path,
+            start_time=start_time,
+            volume=audio_volume
+        )
+    except Exception as e:
+        raise ValueError(f"Error adding voiceover: {str(e)}")
+    finally:
+        if video is not None:
+            video.close()
+        if voiceover is not None:
+            voiceover.close()
+        if final_video is not None:
+            final_video.close()
+
+# Define the list of video editing tools
 moviepy_tools = [
-    load_video,
-    trim_video,
-    apply_effect,
-    concatenate_videos,
-    extract_audio,
-    add_text,
-    convert_format
+    Tool(load_video),
+    Tool(trim_video),
+    Tool(apply_effect),
+    Tool(concatenate_videos),
+    Tool(extract_audio),
+    Tool(add_text),
+    Tool(convert_format),
+    Tool(add_voiceover)
 ]

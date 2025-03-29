@@ -4,7 +4,8 @@ from tools.moviepy_tool import (
     TextPosition,
     apply_effect,
     add_text,
-    concatenate_videos
+    concatenate_videos,
+    add_voiceover
 )
 
 def create_advanced_composition():
@@ -17,11 +18,13 @@ def create_advanced_composition():
     2. Create picture-in-picture effects using chromakey
     3. Add text overlays with timing
     4. Create smooth transitions between complex scenes
+    5. Add voiceover narration with timing control
     
     The example assumes you have these input files:
     - main.mp4: Main footage
     - overlay.mp4: Greenscreen overlay footage
     - background.mp4: Background footage
+    - narration.mp3: Voiceover audio file
     """
     # Step 1: Create a slow-motion intro with fade
     intro_params = EffectParams(factor=0.5)  # Half speed
@@ -84,11 +87,20 @@ def create_advanced_composition():
         end_time=4.0
     )
     
-    # Step 6: Create final composition
+    # Step 6: Add voiceover narration
+    add_voiceover(
+        "overlay_rotated.mp4",
+        "narration.mp3",  # Voiceover audio track
+        "overlay_with_voice.mp4",
+        start_time=1.0,  # Start narration after 1 second
+        audio_volume=1.2  # Slightly increase voiceover volume
+    )
+    
+    # Step 7: Create final composition
     concatenate_videos(
         [
             "intro_with_text.mp4",
-            "overlay_rotated.mp4",
+            "overlay_with_voice.mp4",
             "transition_mirror.mp4"
         ],
         "final_composition.mp4"
